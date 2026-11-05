@@ -1,31 +1,193 @@
-name: Build Scratch SB3
+#!/usr/bin/env python3
+"""Build a small Scratch 3 project using conservative, native block JSON.
 
-on:
-  workflow_dispatch:
-  push:
-    branches: [main]
+The previous builders used invalid Scratch input encodings and malformed parent
+links. This version deliberately uses only simple event hats and motion blocks,
+which avoids those risky nested block connections while keeping the project
+editable in Scratch. No third-party Python packages are needed.
+"""
 
-permissions:
-  contents: read
+import hashlib
+import json
+import zipfile
+from pathlib import Path
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+OUTPUT = Path("chrono-rift.sb3")
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+BACKDROP = '''<svg xmlns="http://www.w3.org/2000/svg" width="480" height="360" viewBox="0 0 480 360">
+<rect width="480" height="360" fill="#081027"/>
+<circle cx="240" cy="180" r="130" fill="#111a42" stroke="#5d43ff" stroke-width="4"/>
+<circle cx="240" cy="180" r="98" fill="none" stroke="#20ddf4" stroke-width="3"/>
+<circle cx="240" cy="180" r="68" fill="#23164d" stroke="#a24dff" stroke-width="3"/>
+<g fill="#d9fbff"><circle cx="38" cy="45" r="2"/><circle cx="91" cy="135" r="1.5"/><circle cx="176" cy="37" r="1.5"/><circle cx="430" cy="57" r="2"/><circle cx="399" cy="287" r="1.5"/><circle cx="49" cy="301" r="2"/><circle cx="326" cy="320" r="1.5"/><circle cx="450" cy="190" r="1.5"/><circle cx="130" cy="244" r="1.5"/></g></svg>'''
 
-      - name: Build Scratch project
-        run: python3 build_game.py
+SHIP = '''<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
+<path d="M50 5 L82 82 L50 65 L18 82 Z" fill="#20e6ff" stroke="#fff" stroke-width="4"/>
+<path d="M50 24 L61 66 L50 59 L39 66 Z" fill="#754dff"/>
+<circle cx="50" cy="50" r="6" fill="#fff"/>
+</svg>'''
 
-      - name: Upload SB3 artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: chrono-rift-sb3
-          path: chrono-rift.sb3
-          if-no-files-found: error
+
+def asset(svg):
+    data = svg.encode("utf-8")
+    digest = hashlib.md5(data).hexdigest()
+    return digest, data
+
+
+def block(opcode, parent, *, inputs=None, fields=None, next_id=None,
+          top=False, x=0, y=0, shadow=False):
+    item = {
+        "opcode": opcode,
+        "next": next_id,
+        "parent": parent,
+        "inputs": inputs or {},
+        "fields": fields or {},
+        "shadow": shadow,
+        "topLevel": top,
+    }
+    if top:
+        item["x"] = x
+        item["y"] = y
+    return item
+
+
+def make_sprite(ship_id):
+    blocks = {}
+    directions = [
+        ("up arrow", "motion_changeyby", "DY", "10", 40, 40),
+        ("down arrow", "motion_changeyby", "DY", "-10", 40, 150),
+        ("left arrow", "motion_changexby", "DX", "-10", 320, 40),
+        ("right arrow", "motion_changexby", "DX", "10", 320, 150),
+    ]
+    for index, (key_name, opcode, input_name, amount, x, y) in enumerate(directions):
+        hat_id = f"key_hat_{index}"
+        move_id = f"move_{index}"
+        blocks[hat_id] = block(
+            "event_whenkeypressed", None,
+            fields={"KEY_OPTION": [key_name, None]},
+            next_id=move_id, top=True, x=x, y=y,
+        )
+        blocks[move_id] = block(
+            opcode, hat_id,
+            inputs={input_name: [1, [4, amount]]},
+        )
+
+    flag_id = "flag_start"
+    say_id = "intro_text"
+    blocks[flag_id] = block("event_whenflagclicked", None, next_id=say_id,
+                            top=True, x=40, y=280)
+    blocks[say_id] = block(
+        "looks_say", flag_id,
+        inputs={"MESSAGE": [1, [10, "CHRONO RIFT  |  Arrow keys move your runner through the time portal!"]]}
+    )
+
+    return {
+        "isStage": False,
+        "name": "Chrono Runner",
+        "variables": {},
+        "lists": {},
+        "broadcasts": {},
+        "blocks": blocks,
+        "comments": {},
+        "currentCostume": 0,
+        "costumes": [{
+            "name": "Chrono Runner",
+            "bitmapResolution": 1,
+            "dataFormat": "svg",
+            "assetId": ship_id,
+            "md5ext": f"{ship_id}.svg",
+            "rotationCenterX": 50,
+            "rotationCenterY": 50,
+        }],
+        "sounds": [],
+        "volume": 100,
+        "layerOrder": 1,
+        "visible": True,
+        "x": 0,
+        "y": 0,
+        "size": 60,
+        "direction": 90,
+        "draggable": False,
+        "rotationStyle": "all around",
+    }
+
+
+def make_project():
+    backdrop_id, backdrop_data = asset(BACKDROP)
+    ship_id, ship_data = asset(SHIP)
+    stage = {
+        "isStage": True,
+        "name": "Stage",
+        "variables": {},
+        "lists": {},
+        "broadcasts": {},
+        "blocks": {},
+        "comments": {},
+        "currentCostume": 0,
+        "costumes": [{
+            "name": "Rift Arena",
+            "bitmapResolution": 1,
+            "dataFormat": "svg",
+            "assetId": backdrop_id,
+            "md5ext": f"{backdrop_id}.svg",
+            "rotationCenterX": 240,
+            "rotationCenterY": 180,
+        }],
+        "sounds": [],
+        "volume": 100,
+        "layerOrder": 0,
+        "tempo": 60,
+        "videoTransparency": 50,
+        "videoState": "on",
+        "textToSpeechLanguage": None,
+    }
+    return {
+        "project": {
+            "targets": [stage, make_sprite(ship_id)],
+            "monitors": [],
+            "extensions": [],
+            "meta": {"semver": "3.0.0", "vm": "0.2.0", "agent": "Chrono Rift"},
+        },
+        "assets": [(f"{backdrop_id}.svg", backdrop_data), (f"{ship_id}.svg", ship_data)],
+    }
+
+
+def validate(path):
+    """Check ZIP integrity, JSON, asset references and block graph relationships."""
+    with zipfile.ZipFile(path, "r") as archive:
+        bad_member = archive.testzip()
+        assert bad_member is None, f"Corrupt ZIP member: {bad_member}"
+        names = set(archive.namelist())
+        project = json.loads(archive.read("project.json"))
+        assert len(project["targets"]) == 2
+        for target in project["targets"]:
+            for costume in target["costumes"]:
+                assert costume["md5ext"] in names, f"Missing asset {costume['md5ext']}"
+            blocks = target["blocks"]
+            for block_id, item in blocks.items():
+                assert isinstance(item.get("opcode"), str)
+                if item["next"] is not None:
+                    assert item["next"] in blocks, f"Invalid next reference in {block_id}"
+                    assert blocks[item["next"]]["parent"] == block_id, f"Invalid next parent for {block_id}"
+                parent = item["parent"]
+                if parent is not None:
+                    assert parent in blocks, f"Missing parent {parent} for {block_id}"
+                for input_value in item["inputs"].values():
+                    if (isinstance(input_value, list) and len(input_value) == 2
+                            and isinstance(input_value[1], str)):
+                        assert input_value[1] in blocks, f"Invalid input reference in {block_id}"
+    print("Archive validation passed (ZIP, JSON, assets and block links).")
+
+
+def main():
+    data = make_project()
+    with zipfile.ZipFile(OUTPUT, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("project.json", json.dumps(data["project"], separators=(",", ":")))
+        for name, content in data["assets"]:
+            archive.writestr(name, content)
+    validate(OUTPUT)
+    print(f"Created {OUTPUT} ({OUTPUT.stat().st_size} bytes)")
+
+
+if __name__ == "__main__":
+    main()
